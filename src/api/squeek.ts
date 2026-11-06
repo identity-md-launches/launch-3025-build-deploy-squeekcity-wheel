@@ -27,6 +27,9 @@ export interface WheelReading {
   /** True only for fresh, hardware-provenance, ACTIVE readings with rpm > 0. */
   bonusEligible: boolean;
   key: string | null;            // dedupe key for this reading
+  /** Why the latest status request failed, null once one succeeds. */
+  checkError: string | null;
+  checkFailedAt: string | null;
 }
 
 export interface Milestone { id: string; type: string; occurredAt: string; text: string; disposition: string | null }
@@ -36,12 +39,29 @@ const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object
 const str = (v: unknown) => (typeof v === "string" ? v : null);
 const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 
-function unavailable(note: string, fetchedAt: string): WheelReading {
+function unavailable(note: string, fetchedAt: string, requestFailed = false): WheelReading {
   return {
     label: "unavailable", note, rpm: null, speedMmPerSecond: null, distanceMm: null, coreStatus: null, provenance: null,
     freshness: null, observedAt: null, receivedAt: null, generatedAt: null, staleAfterSeconds: null, counterEpoch: null,
     moduleState: null, fetchedAt, bonusEligible: false, key: null,
+    checkError: requestFailed ? note : null, checkFailedAt: requestFailed ? fetchedAt : null,
   };
+}
+
+const DEFAULT_STALE_AFTER_S = 120;
+const isExpired = (receivedAt: string | null, staleAfter: number, now: Date) =>
+  !((now.getTime() - Date.parse(receivedAt ?? "")) / 1000 <= staleAfter);
+const staleNote = (receivedAt: string | null) => `Last reading is stale (received ${receivedAt ?? "unknown"}). No bonus while stale.`;
+
+/** A reading stops being fresh at receivedAt + staleAfterSeconds, whether or not another request ever completes. */
+export function ageReading(r: WheelReading, now: Date): WheelReading {
+  if (r.label === "stale" || !r.receivedAt || !isExpired(r.receivedAt, r.staleAfterSeconds ?? DEFAULT_STALE_AFTER_S, now)) return r;
+  return { ...r, label: "stale", note: staleNote(r.receivedAt), bonusEligible: false };
+}
+
+/** A failed request says nothing about the wheel: keep the last reading and its timestamps, and record the failure. */
+export function mergeReading(prev: WheelReading | null, next: WheelReading): WheelReading {
+  return next.checkError && prev?.receivedAt ? { ...prev, checkError: next.checkError, checkFailedAt: next.checkFailedAt } : next;
 }
 
 /** Pure parser so it can be tested against recorded responses. */
@@ -57,19 +77,18 @@ export function parseStatus(json: unknown, now: Date): WheelReading {
   const coreStatus = str(m.coreStatus);
   const receivedAt = str(m.receivedAt);
   const observedAt = str(m.observedAt);
-  const staleAfter = num(m.staleAfterSeconds) ?? 120;
+  const staleAfter = num(m.staleAfterSeconds) ?? DEFAULT_STALE_AFTER_S;
   const wheel = Array.isArray(json.modules) ? json.modules.find((x) => isObj(x) && x.moduleType === "wheel.counter") : undefined;
   const base: WheelReading = {
     label: "live", note: "", rpm: rpmMilli === null ? null : rpmMilli / 1000,
     speedMmPerSecond: num(m.speedMmPerSecond), distanceMm: num(m.distanceMm), coreStatus, provenance, freshness,
     observedAt, receivedAt, generatedAt: str(json.generatedAt), staleAfterSeconds: staleAfter, counterEpoch: str(m.counterEpoch),
     moduleState: isObj(wheel) ? str(wheel.state) : null, fetchedAt, bonusEligible: false,
-    key: observedAt ? `${str(m.counterEpoch) ?? "?"}:${observedAt}` : null,
+    key: observedAt ? `${str(m.counterEpoch) ?? "?"}:${observedAt}` : null, checkError: null, checkFailedAt: null,
   };
   // Freshness: trust the API's own flag, and also check the age on this device's clock.
-  const ageS = receivedAt ? (now.getTime() - Date.parse(receivedAt)) / 1000 : Infinity;
-  const fresh = freshness === "online" && ageS <= staleAfter;
-  if (!fresh) return { ...base, label: "stale", note: `Last reading is stale (received ${receivedAt ?? "unknown"}). No bonus while stale.` };
+  const fresh = freshness === "online" && !isExpired(receivedAt, staleAfter, now);
+  if (!fresh) return { ...base, label: "stale", note: staleNote(receivedAt) };
   if (provenance === "simulated") return { ...base, label: "simulated", note: "The API marks this reading as simulated. Shown, never rewarded." };
   if (provenance === "replay") return { ...base, label: "replay", note: "The API marks this reading as a replay. Shown, never rewarded." };
   if (provenance === "derived") return { ...base, label: "derived", note: "The API marks this reading as derived. Shown, never rewarded." };
@@ -106,26 +125,40 @@ export function parseEvents(json: unknown, now: Date): EventsResult {
   return { label: "available", reason: null, milestones, fetchedAt };
 }
 
-export async function fetchStatus(signal?: AbortSignal): Promise<WheelReading> {
-  const now = new Date();
+/** Shorter than the 15 s poll, so a hung request ends before the next one starts. */
+export const REQUEST_TIMEOUT_MS = 10000;
+
+/** Every API request ends: with JSON, an HTTP status, or a timeout or network failure. */
+async function getJson(path: string): Promise<{ json: unknown } | { failure: "timeout" | "network" | number }> {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), REQUEST_TIMEOUT_MS);
   try {
-    const r = await fetch(`${API_BASE}/v1/status`, { signal, cache: "no-store" });
-    if (!r.ok) return unavailable(`Status request failed with HTTP ${r.status}.`, now.toISOString());
-    return parseStatus(await r.json(), new Date());
+    const r = await fetch(`${API_BASE}${path}`, { signal: ctl.signal, cache: "no-store" });
+    if (!r.ok) return { failure: r.status };
+    return { json: await r.json() };
   } catch {
-    return unavailable("Squeekchain API is unreachable. The city keeps running on its own wheels.", now.toISOString());
+    return { failure: ctl.signal.aborted ? "timeout" : "network" };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
-export async function fetchMilestones(signal?: AbortSignal): Promise<EventsResult> {
+export async function fetchStatus(): Promise<WheelReading> {
+  const got = await getJson("/v1/status");
   const now = new Date();
-  try {
-    const r = await fetch(`${API_BASE}/v1/events?category=measurement&limit=40`, { signal, cache: "no-store" });
-    if (!r.ok) return { label: "unavailable", reason: `http_${r.status}`, milestones: [], fetchedAt: now.toISOString() };
-    return parseEvents(await r.json(), new Date());
-  } catch {
-    return { label: "unavailable", reason: "network", milestones: [], fetchedAt: now.toISOString() };
-  }
+  if ("json" in got) return parseStatus(got.json, now);
+  const note = got.failure === "timeout" ? `Status request timed out after ${REQUEST_TIMEOUT_MS / 1000} s. The city keeps running on its own wheels.`
+    : got.failure === "network" ? "Squeekchain API is unreachable. The city keeps running on its own wheels."
+    : `Status request failed with HTTP ${got.failure}.`;
+  return unavailable(note, now.toISOString(), true);
+}
+
+export async function fetchMilestones(): Promise<EventsResult> {
+  const got = await getJson("/v1/events?category=measurement&limit=40");
+  const now = new Date();
+  if ("json" in got) return parseEvents(got.json, now);
+  const reason = typeof got.failure === "number" ? `http_${got.failure}` : got.failure;
+  return { label: "unavailable", reason, milestones: [], fetchedAt: now.toISOString() };
 }
 
 export const LABEL_TEXT: Record<DataLabel, string> = {

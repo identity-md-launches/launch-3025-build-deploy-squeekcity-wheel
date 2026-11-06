@@ -46,6 +46,8 @@ Schemas were checked against the live API and https://docs.squeekchain.com/devel
 - Labels: *Live hardware*, *Live, wheel idle*, *Stale* (the API says stale, or `receivedAt` is older than `staleAfterSeconds` on this device's clock), *Simulated*, *Replayed*, *Derived*, and *Unavailable* (network error, HTTP error, unknown schema, `measurement: null`, `COUNTER_FAULT`). Unknown values show as "Unknown", never as zero.
 - Bonus: only for fresh `provenance: "hardware"` readings with `coreStatus: "ACTIVE"` and RPM > 0. The bonus is RPM × 0.3, capped at 25 WE per reading and 300 WE per real hour. Each reading is keyed by `counterEpoch:observedAt` and credited once. A bonus triggers a visible power surge (glowing halls and battery, faster wheels).
 - Milestones: only accepted `measurement.*` events go into the City Chronicle, deduplicated by event `id`. Each one pays 150 WE once, and only if it happened after this city was founded. Older milestones are recorded with "no bonus".
+- A reading expires at `receivedAt` + `staleAfterSeconds`, re-checked on every interface refresh, so it turns *Stale* even if no later request completes. Requests time out after 10 s.
+- If a request fails, the last reading and its timestamps stay on screen with the failure noted, and it goes stale on schedule. With no earlier reading to keep, the label is *Unavailable*.
 - If the API is down, the city keeps running on its own wheels.
 
 ## Source map
@@ -61,16 +63,17 @@ Schemas were checked against the live API and https://docs.squeekchain.com/devel
 
 ## Validation (worker-side, 2026-11-06)
 
-Full record in `artifacts/validation.md`. Summary:
+Full record, including the six-domain Better Interface review, in `VALIDATION.md`. The design system is in `DESIGN.md`. Summary for the latest revision:
 
 - `npm run build` (tsc + vite): passed. `npx tsc --noEmit`: passed.
-- `npx vitest run`: 13/13 passed. Covers routines (sleep, walk, work, eat), WE bounds, promotions and seat limits, rain sheltering, upgrade cost and refusal, festival and trees, the population cap, bonus caps and dedupe, and API parsing for live, idle, stale, simulated, replay, fault and unavailable.
-- Playwright (Chromium) against the built `dist/` served under a subpath, at 1440×900 and 390×844: 34/34 checks passed. These covered district entry, Back to City, building upgrade, leaderboard, Live Studio link, rain, trees, pause, hamster profile, wallet sheet and Escape, a save that survives reload, and the live API. The status label read "Live, wheel idle" because the real wheel was idle. There were no console errors.
+- `npx vitest run`: 20/20 passed. Covers routines (sleep, walk, work, eat), WE bounds, promotions and seat limits, rain sheltering, upgrade cost and refusal, festival and trees, the population cap, bonus caps and dedupe, API parsing for every label, reading expiry, and request timeouts and failures.
+- Playwright (Chromium) against the built `dist/`, at 320 to 1440 wide: 53/53 extended checks (connected header at nine widths, wallet flows, modal keyboard, reading timeline, bonus on fixtures) and 30/30 primary-flow checks served under a subpath (districts, Live Studio link, upgrades, profile, leaderboard, god mode, saves). There were no console errors apart from the blocked API requests described below.
 - Design probe `taste.mjs`: 16/16 at 320, 390 and 1440.
 
 **Limitations:**
-- Not tested: a real wallet connection (no wallet extension in the test browser), a WebKit/Safari run (that browser build isn't installed here), a physical phone and a screen reader.
-- A WE bonus from a live ACTIVE reading wasn't seen end to end, because the real wheel was idle during testing. The unit tests cover that path.
+- **Live API not confirmed in this revision.** `api.squeekchain.com` answered this machine with a Cloudflare challenge (HTTP 403) on every request, so the game showed Unavailable and kept running. The labels, expiry and bonus were tested on fixtures in the recorded schema, not on live data. Whether visitors' browsers meet the same challenge needs confirming with Squeekchain.
+- Not tested: a real wallet connection (an injected test provider was used), a WebKit/Safari run, a physical phone and a screen reader.
+- Open accessibility findings are listed in `VALIDATION.md`: panel tabs have no arrow-key support, focus falls to the page after connecting or disconnecting, and the canvas ignores reduced motion.
 - Hamsters inside closed buildings show as occupancy badges, not interior scenes.
 - Fonts fall back to system faces. Quicksand and IBM Plex Mono are named but not bundled.
 

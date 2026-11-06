@@ -1,9 +1,20 @@
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { OPEN_IN, TARGET_CHAIN, connect, disconnect, discoverWallets, isMobileBrowser, shortAddr, switchToSepolia, tryReconnect, type DiscoveredWallet, type Session } from "../wallet/wallet";
 
 const WALLET_MARKS: Record<string, string> = {
   metamask: "#f6851b", rabby: "#7084ff", okx: "#1a1a20",
 };
+
+/** Tab and Shift+Tab wrap around the dialog's own controls. */
+function keepTabInside(e: KeyboardEvent, box: HTMLElement) {
+  const items = [...box.querySelectorAll<HTMLElement>("button:not(:disabled), a[href]")];
+  const edge = e.shiftKey ? items[0] : items[items.length - 1];
+  const active = document.activeElement;
+  if (active !== edge && box.contains(active)) return;
+  e.preventDefault();
+  (e.shiftKey ? items[items.length - 1] : items[0])?.focus();
+}
 
 export function WalletControl() {
   const [wallets, setWallets] = useState<DiscoveredWallet[]>([]);
@@ -18,7 +29,7 @@ export function WalletControl() {
   useEffect(() => discoverWallets(setWallets), []);
   useEffect(() => {
     if (session || !wallets.length) return;
-    tryReconnect(wallets).then((s) => s && setSession(s)).catch(() => undefined);
+    tryReconnect(wallets).then((s) => { if (s) { setSession(s); setOpen(false); } }).catch(() => undefined);
   }, [wallets, session]);
   useEffect(() => {
     if (!session) return;
@@ -31,10 +42,15 @@ export function WalletControl() {
   useEffect(() => {
     if (!open) return;
     const prev = document.activeElement as HTMLElement | null;
+    const game = document.getElementById("root"); // the sheet is portalled outside it
+    if (game) game.inert = true;
     sheet.current?.querySelector<HTMLElement>("button, a")?.focus();
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+      else if (e.key === "Tab" && sheet.current) keepTabInside(e, sheet.current);
+    };
     addEventListener("keydown", onKey);
-    return () => { removeEventListener("keydown", onKey); (prev ?? trigger.current)?.focus(); };
+    return () => { removeEventListener("keydown", onKey); if (game) game.inert = false; (prev ?? trigger.current)?.focus(); };
   }, [open]);
 
   async function pickWallet(w: DiscoveredWallet) {
@@ -64,7 +80,7 @@ export function WalletControl() {
   return (
     <>
       <button ref={trigger} className="btn btn-accent" onClick={() => setOpen(true)}>Connect</button>
-      {open && (
+      {open && createPortal(
         <div className="sheet-bg" onClick={() => setOpen(false)}>
           <div className="sheet" role="dialog" aria-modal="true" aria-labelledby="wallet-title" ref={sheet} onClick={(e) => e.stopPropagation()}>
             <div className="sheet-head">
@@ -89,7 +105,8 @@ export function WalletControl() {
             )}
             {note && <p className="small warn" role="status">{note}</p>}
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </>
   );

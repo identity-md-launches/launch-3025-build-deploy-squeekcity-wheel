@@ -344,12 +344,13 @@ export function SqueekPanel({ s, reading, events }: { s: CityState; reading: Whe
           <dt>Distance today</dt><dd className="mono">{reading.distanceMm === null ? "Unknown" : `${(reading.distanceMm / 1e6).toFixed(2)} km`}</dd>
           <dt>Wheel status</dt><dd className="mono">{reading.coreStatus ?? "Unknown"}{reading.moduleState ? ` · module ${reading.moduleState}` : ""}</dd>
           <dt>Provenance</dt><dd className="mono">{reading.provenance ?? "Unknown"}</dd>
-          <dt>Freshness</dt><dd className="mono">{reading.freshness ?? "Unknown"} (stale after {reading.staleAfterSeconds ?? "?"} s)</dd>
+          <dt>Freshness</dt><dd className="mono">{label === "stale" ? "stale" : reading.freshness ?? "Unknown"} (stale after {reading.staleAfterSeconds ?? "?"} s)</dd>
           <dt>Observed</dt><dd className="mono">{reading.observedAt ? new Date(reading.observedAt).toLocaleTimeString() : "Unknown"}</dd>
           <dt>Received</dt><dd className="mono">{reading.receivedAt ? new Date(reading.receivedAt).toLocaleTimeString() : "Unknown"}</dd>
         </dl>
       )}
       {reading && <p className="muted small">Checked {new Date(reading.fetchedAt).toLocaleTimeString()} · every 15 seconds.</p>}
+      {reading?.checkError && reading.label !== "unavailable" && <p className="small warn">The check at {new Date(reading.checkFailedAt!).toLocaleTimeString()} failed: {reading.checkError}</p>}
       <div className="stack-tight">
         <h3>How the bonus works</h3>
         <p className="small">Only a fresh, hardware-provenance reading with the wheel ACTIVE adds Wheel Energy: RPM × 0.3, at most {BONUS_PER_READING_CAP} WE per reading and {BONUS_PER_HOUR_CAP} WE per real hour. Each reading counts once. Confirmed milestones from /v1/events add {MILESTONE_BONUS} WE once, if they happen after this city was founded.</p>

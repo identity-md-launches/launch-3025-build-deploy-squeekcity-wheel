@@ -5,17 +5,18 @@ import {
   building, clock, creditMilestone, creditWheelReading, dayOf, FESTIVAL_COST, GAME_MIN_PER_SEC, godFestival, godRain, godSun, godTrees, log, newCity, step, TREE_COST,
 } from "./sim/engine";
 import { districtCenter, project, render, type Camera, type Hit } from "./render/render";
-import { fetchMilestones, fetchStatus, LABEL_TEXT, type EventsResult, type WheelReading } from "./api/squeek";
+import { ageReading, fetchMilestones, fetchStatus, LABEL_TEXT, mergeReading, type EventsResult, type WheelReading } from "./api/squeek";
 import { deleteCity, loadCity, saveCity } from "./save";
 import { BuildingPanel, Chronicle, Citizens, DistrictPanel, HamsterPanel, Overview, SqueekPanel } from "./ui/Panels";
 import { WalletControl } from "./ui/WalletControl";
 
 const PX = 2; // one art pixel = 2 CSS pixels
+const MIN_ZOOM = 0.45, MAX_ZOOM = 3.2;
 /** Frame the whole city: the map is 832 x 416 art pixels at zoom 1. */
 function cityCam(): Camera {
   const el = document.querySelector(".canvas-wrap");
   const W = (el?.clientWidth ?? window.innerWidth) / PX, H = (el?.clientHeight ?? window.innerHeight * 0.6) / PX;
-  return { x: 0, y: 13 * 16 - 10, zoom: Math.max(0.45, Math.min(1.4, Math.min(W / 760, H / 440))) };
+  return { x: 0, y: 13 * 16 - 10, zoom: Math.max(MIN_ZOOM, Math.min(1.4, Math.min(W / 760, H / 440))) };
 }
 type Tab = "map" | "citizens" | "chronicle" | "squeek";
 
@@ -28,7 +29,7 @@ export default function App() {
   const [sel, setSel] = useState<{ building: string | null; hamster: string | null }>({ building: null, hamster: null });
   const [tab, setTab] = useState<Tab>("map");
   const [sheetOpen, setSheetOpen] = useState(true);
-  const [reading, setReading] = useState<WheelReading | null>(null);
+  const [lastReading, setLastReading] = useState<WheelReading | null>(null);
   const [events, setEvents] = useState<EventsResult | null>(null);
   const [savedAt, setSavedAt] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -114,7 +115,7 @@ export default function App() {
     const poll = async () => {
       const r = await fetchStatus();
       if (!alive) return;
-      setReading(r);
+      setLastReading((prev) => mergeReading(prev, r));
       const s = cityRef.current!;
       if (r.bonusEligible && r.key && r.rpm) {
         const amt = creditWheelReading(s, r.key, r.rpm, new Date());
@@ -157,7 +158,7 @@ export default function App() {
 
   /* pointer: drag to pan, wheel/pinch to zoom, tap to pick */
   const drag = useRef<{ x: number; y: number; moved: boolean; pts: Map<number, { x: number; y: number }>; pinch: number | null }>({ x: 0, y: 0, moved: false, pts: new Map(), pinch: null });
-  const zoomBy = (f: number) => { camTarget.current = null; cam.current.zoom = Math.max(0.6, Math.min(3.2, cam.current.zoom * f)); };
+  const zoomBy = (f: number) => { camTarget.current = null; cam.current.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, cam.current.zoom * f)); };
   function onPointerDown(e: React.PointerEvent) {
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
     const d = drag.current; d.pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -199,6 +200,7 @@ export default function App() {
   const hour = (s.time % 1440) / 60;
   const selH = sel.hamster ? s.hamsters.find((h) => h.id === sel.hamster) : undefined;
   const selB = sel.building ? building(s, sel.building) : undefined;
+  const reading = lastReading && ageReading(lastReading, new Date()); // re-derived on every UI refresh
   const W = size.current.W, H = size.current.H;
   const weatherText = s.weather === "rain" ? "Rain" : s.weather === "sunny" ? "Sunny" : "Cloudy";
   const surge = s.time < s.surgeUntil;
@@ -287,7 +289,7 @@ export default function App() {
               ) : selB ? (
                 <>
                   <button className="link back-link" onClick={() => setSel({ building: null, hamster: null })}>← {DISTRICTS[selB.district].name}</button>
-                  <BuildingPanel s={s} b={selB} nav={nav} />
+                  <BuildingPanel key={selB.id} s={s} b={selB} nav={nav} />
                 </>
               ) : view ? <DistrictPanel s={s} d={view} nav={nav} /> : <Overview s={s} nav={nav} />)}
               {tab === "citizens" && <Citizens s={s} nav={nav} />}
